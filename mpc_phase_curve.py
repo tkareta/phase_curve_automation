@@ -6,8 +6,13 @@ from astropy.time import Time
 from matplotlib import rcParams
 import matplotlib.font_manager as font_manager
 from scipy.interpolate import interp1d
+from numpy.polynomial import Polynomial
+from scipy.optimize import minimize
+import emcee
+import corner
 
 plt.clf()
+plt.close('all')
 plt.style.use('/Users/tkareta/Research/utilities/teddy.mplstyle')
 
 colors = ['#000104', '#ed1c24', '#1e90ff', '#bcbec0']
@@ -16,15 +21,35 @@ def convert_to_V(mags, filters):
     conversions = numpy.genfromtxt("BandConversion.txt", dtype=str)
     for i in range(len(mags)):
         index = numpy.where(conversions[:,0] == filters[i])
-        print(i, filters[i])
+        #print(i, filters[i])
         if filters[i]!="--" and filters[i]!="T" and filters[i]!="N":
             mags[i] += float(conversions[:,1][index])
         else:
             mags[i] += -0.8
     return mags
 
-def reduce(m, r, delta):
-    return m - 5.0 * numpy.log10(r*delta)
+def reduce(m, r, delta):    
+    H = m - 5.0 * numpy.log10(r*delta)
+    print(m.size, r.size, delta.size, H.size)
+    return H
+
+def log_likelihood(theta, x, y, yerr):
+    b, H, log_f = theta
+    model = b * x + H
+    sigma2 = yerr**2 + model**2 * numpy.exp(2 * log_f)
+    return -0.5 * numpy.sum((y - model) ** 2 / sigma2 + numpy.log(sigma2))
+
+def log_prior(theta):
+    b, H, log_f = theta
+    if 0.0 < b < 1.0 and 0.0 < H < 20.0 and -10.0 < log_f < 1.0:
+        return 0.0
+    return -numpy.inf
+
+def log_probability(theta, x, y, yerr):
+    lp = log_prior(theta)
+    if not numpy.isfinite(lp):
+        return -numpy.inf
+    return lp + log_likelihood(theta, x, y, yerr)
 
 def working_area(targetname, tzero_isot = "1995-01-01"):
     obs = MPC.get_observations(targetname)
@@ -37,11 +62,22 @@ def working_area(targetname, tzero_isot = "1995-01-01"):
     filters = obs["band"]
     observers = obs["observatory"]
 
+    est_err = numpy.zeros(len(mags))
+    for i in range(len(mags)):
+        if len(str(mags[i])) == 4 or len(str(mags[i])) == 3:
+            est_err[i] = 0.1
+        else:
+            est_err[i] = 0.04
+
+
     clip = numpy.where(mags < 30.0) # temp!
     times, mags, filters, observers = times[clip], mags[clip], filters[clip], observers[clip]
     mags = convert_to_V(mags, filters)
+    est_err = est_err[clip]
     clip = numpy.where(mags > -98)
     times, mags, filters, observers = times[clip], mags[clip], filters[clip], observers[clip]
+    times_year = Time(times, format="jd").decimalyear
+    est_err = est_err[clip]
 
     eph = MPC.get_ephemeris(targetname, step="30d", start = tzero_isot, number = 36*12)
 
@@ -51,42 +87,126 @@ def working_area(targetname, tzero_isot = "1995-01-01"):
     mpc_delta = eph["Delta"] #AU
     mpc_phase = eph["Phase"] #degrees
 
+    # interpolation set-up
+
     r_obs = numpy.interp(times, mpc_times, mpc_r)
     delta_obs = numpy.interp(times, mpc_times, mpc_delta)
     phase_obs = numpy.interp(times, mpc_times, mpc_phase)
+    times_year = Time(times, format="jd").decimalyear
 
     H = reduce(mags, r_obs, delta_obs)
+    print(H.shape)
+
+    # time-based outlier rejection
+    times_all = times
+    times_year_all = times_year
+    mags_all = mags
+    est_err_all = est_err
+    H_all = H
+    phase_obs_all = phase_obs
+    x1 = numpy.logical_or(times_year > 2006.5, times_year < 2005.5)
+    x2 = numpy.logical_or(times_year > 2018.1, times_year < 2017.9)
+    conds = numpy.logical_and(x1,x2)
+    x3 = numpy.logical_or(times_year > 2011.7, times_year < 2011.2)
+    x4 = numpy.logical_or(times_year > 2016.75, times_year < 2016.65)
+    conds = numpy.logical_and(conds,x3)
+    conds = numpy.logical_and(conds,x4)
+
+    times = times[conds]
+    times_year = times_year[conds]
+    mags = mags[conds]
+    H = H[conds]
+    phase_obs = phase_obs[conds]
+    est_err = est_err[conds]
+    # preliminary outlier rejection
+
+    p = Polynomial.fit(phase_obs, H, 1)
+    prelim_phase_curve = p(phase_obs)
+    diffs = H - prelim_phase_curve
+    sigma_for_clipping = diffs.std()
+    p1 = p.convert().coef
+    print("Estimated 'real' magnitude scatter:", sigma_for_clipping)
+    sigclip = numpy.where(numpy.abs(diffs) < 0.5 * sigma_for_clipping)
+
+    p = Polynomial.fit(phase_obs[sigclip], H[sigclip], 1)
+    prelim_phase_curve = p(phase_obs)
+    p2 = p.convert().coef
+    print(p1, p2)
 
 
-    fig, (ax1, ax2) = plt.subplots(2,1)
+    print("all observations reduced and initial guess at phase curve completed")
+    print("now attempting MCMC fitting of phase curve....")
+    nll = lambda *args: -log_likelihood(*args)
+    initial = numpy.array([p2[1], p2[0], numpy.log(0.01)]) + 0.05 * numpy.random.randn(3)
+    print("initial guess b, H, log_f:", initial)
+    soln = minimize(nll, initial, args=(phase_obs, H, est_err))
+    b_ml, H_ml, log_f_ml = soln.x
 
-    H = 12
+    print("Maximum likelihood estimates:")
+    print("b = {0:.3f}".format(b_ml))
+    print("H = {0:.3f}".format(H_ml))
+    print("f = {0:.3f}".format(numpy.exp(log_f_ml)))
+
+    
+    pos = soln.x + 1e-4 * numpy.random.randn(32, 3)
+    nwalkers, ndim = pos.shape
+
+    sampler = emcee.EnsembleSampler(
+        nwalkers, ndim, log_probability, args=(phase_obs, H, est_err)
+    )
+    sampler.run_mcmc(pos, 10000, progress=True);
+    tau = sampler.get_autocorr_time()
+    print("tau : ", tau)
+    medtau = numpy.median(tau)
+    flat_samples = sampler.get_chain(discard=3 * int(medtau), thin=int(medtau/2.), flat=True)
+
+    labels = ["Slope [Mags/Deg]", 'H(1,1,0)', 'log(f)']
+    fig = corner.corner(flat_samples, labels=labels, color="black", label_kwargs = {'font':"Futura"})
+
+    for i in range(ndim):
+        mcmc = numpy.percentile(flat_samples[:, i], [16, 50, 84])
+        q = numpy.diff(mcmc)
+        print(mcmc[1], q[0], q[1], labels[i])
+    samples = sampler.get_chain(discard=0, flat=True)
+    theta_max = samples[numpy.argmax(sampler.get_log_prob())]
+    print("Max likelihood combo:", theta_max)
+    plt.savefig("corner.png", dpi=300)
+
+    plt.close('all')
+    fig, (ax1, ax2, ax3) = plt.subplots(3,1)
+    fig.set_size_inches(6, 9, forward=True)
+
     #V_model = H + 5.0 * numpy.log10(r_obs * delta_obs) + 0.04 * phase_obs
-    ax1.plot(times - tzero, mags, 'o', color=colors[0], label="Observations from the MPC", zorder=2)
+    ax1.plot(times_year, mags, 'o', color=colors[0], label="MPC Obs. (Clipped)", zorder=2)
+    ax1.plot(times_year_all, mags_all, 'o', color=colors[2], label="All MPC Obs.", zorder=1, alpha=0.5)
 
-    #tmarker = Time("2024-01-01").jd
-    #plt.plot([tmarker, tmarker] - tzero, [28.9, 28.4], ls='dashed', color="black")
-    #plt.text(tmarker-tzero, 28.2, "2024", ha="center", va="center", font="Futura", fontsize=10)
-    #tmarker = Time("2025-01-01").jd
-    #plt.plot([tmarker, tmarker] - tzero, [28.9, 28.4], ls='dashed', color="black")
-    #plt.text(tmarker-tzero, 28.2, "2025", ha="center", va="center", font="Futura", fontsize=10)
+    ax1.legend(loc='lower center',ncol=2)
+    ax1.set_ylim(int(mags_all.max()), int(mags_all.min()-1))
+    ax1.set_xlabel("Calendar Year", font="Futura")
+    ax1.set_ylabel(r'$m_V$', font="Futura")
 
-    #tmarker = 2460650.240903
-    #plt.annotate("", xytext=(tmarker-tzero, 26.1), xy=(tmarker-tzero, 27.1), arrowprops=dict(arrowstyle="->", lw = 2.0, color=colors[1]))
-    #plt.plot([tmarker - 10, tmarker + 10] - tzero, [26.1, 26.1], ls='dashed', color=colors[1], label="HST Single Frame Limit")
+    ax2.plot(times_year, H, 'o', color=colors[0], label="MPC Obs. (Clipped)", zorder=2)
+    ax2.plot(times_year_all, H_all, 'o', color=colors[2], label="All MPC Obs.", zorder=1, alpha=0.5)
 
-    #plt.plot(2460650.240903 - tzero, 27.9, 'o', color=colors[1], label="HST 8-frame Stack", zorder=2, markersize=6)
-    #plt.plot([2460650.240903 - tzero, 2460650.240903 - tzero], [27.4,28.4], color=colors[1], zorder=2, lw = 2.0)
+    ax2.legend(loc='lower center',ncol=2)
+    ax2.set_ylim(int(H.max()), int(H.min()-1))
+    ax2.set_xlabel("Calendar Year", font="Futura")
+    ax2.set_ylabel(r'$H_V(1,1,\alpha)$', font="Futura")
 
-    #plt.plot(times - tzero, V_model, color=colors[2], ls='dashed', zorder=1, label="App. Mag. model, Temp.")
+    ax3.plot(phase_obs, H, 'o', color=colors[0], label="MPC Obs. (Clipped)", zorder=2)
+    ax3.plot(phase_obs, prelim_phase_curve, color="orangered", zorder=3)
+    ax3.plot(phase_obs_all, H_all, 'o', color=colors[2], label="All MPC Obs.", zorder=1, alpha=0.5)
 
-    plt.legend(loc='best')
-    #plt.ylim(28.9, 20.2)
-    #plt.xlim(0.0, 575)
-    ax1.set_xlabel("Days Since " + str(tzero_isot), font="Futura")
-    ax1.set_ylabel("Apparent V Magnitude", font="Futura")
+    ax3.legend(loc='lower center',ncol=2)
+    ax3.set_ylim(int(H.max()), int(H.min()-1))
+    ax3.set_xlabel(r'$\alpha$'+" "+r'$(^{\circ})$', font="Futura")
+    ax3.set_ylabel(r'$H_V(1,1,\alpha)$', font="Futura")
+
     plt.tight_layout()
-    plt.savefig("secular_draft.png", dpi=400)
+    plt.subplots_adjust(hspace=0.22)
+
+    
+    #plt.savefig("secular_draft.png", dpi=400)
     plt.show()
 
 if __name__ == '__main__':
