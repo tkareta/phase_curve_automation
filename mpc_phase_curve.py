@@ -51,7 +51,7 @@ def log_probability(theta, x, y, yerr):
         return -numpy.inf
     return lp + log_likelihood(theta, x, y, yerr)
 
-def working_area(targetname, tzero_isot = "1995-01-01"):
+def working_area(targetname, tzero_isot = "1999-01-01"):
     obs = MPC.get_observations(targetname)
     times = obs["epoch"].value #Julian Dates
     times_isot = Time(times, format="jd").isot
@@ -79,10 +79,13 @@ def working_area(targetname, tzero_isot = "1995-01-01"):
     times_year = Time(times, format="jd").decimalyear
     est_err = est_err[clip]
 
-    eph = MPC.get_ephemeris(targetname, step="30d", start = tzero_isot, number = 36*12)
+    eph = MPC.get_ephemeris(targetname, step="20d", start = tzero_isot, number = 1100)
 
     #horizons_output = numpy.genfromtxt("horizons_results.txt")
     mpc_times = Time(eph["Date"], format="isot").jd #JD
+
+
+    print("MPC Ephemeris Date Range:", Time(mpc_times.min(), format="jd").decimalyear, Time(mpc_times.max(), format="jd").decimalyear)
     mpc_r = eph["r"] #AU
     mpc_delta = eph["Delta"] #AU
     mpc_phase = eph["Phase"] #degrees
@@ -118,7 +121,7 @@ def working_area(targetname, tzero_isot = "1995-01-01"):
     H = H[conds]
     phase_obs = phase_obs[conds]
     est_err = est_err[conds]
-    # preliminary outlier rejection
+    # preliminary outlier rejection to improve initial guess for MCMC
 
     p = Polynomial.fit(phase_obs, H, 1)
     prelim_phase_curve = p(phase_obs)
@@ -131,7 +134,7 @@ def working_area(targetname, tzero_isot = "1995-01-01"):
     p = Polynomial.fit(phase_obs[sigclip], H[sigclip], 1)
     prelim_phase_curve = p(phase_obs)
     p2 = p.convert().coef
-    print(p1, p2)
+    #print(p1, p2)
 
 
     print("all observations reduced and initial guess at phase curve completed")
@@ -170,23 +173,39 @@ def working_area(targetname, tzero_isot = "1995-01-01"):
     samples = sampler.get_chain(discard=0, flat=True)
     theta_max = samples[numpy.argmax(sampler.get_log_prob())]
     print("Max likelihood combo:", theta_max)
-    plt.savefig("corner.png", dpi=300)
+    p_max = Polynomial(numpy.array([theta_max[1], theta_max[0]]))
+    time_model = numpy.linspace(times.min(), times.max(), 10000)
+    
+    r_model = numpy.interp(time_model, mpc_times, mpc_r)
+    delta_model = numpy.interp(time_model, mpc_times, mpc_delta)
+    phase_model = numpy.interp(time_model, mpc_times, mpc_phase)
+    times_model = Time(time_model, format="jd").decimalyear
+    print("time range:", times_model.min(), times_model.max())
+    H_11a_model = p_max(phase_model)
+    m_model = H_11a_model + 5.0 * numpy.log10(r_model * delta_model)
+    #print(times_model.size, H_11a_model.size)
 
-    plt.close('all')
+    #plt.savefig("corner.png", dpi=300)
+
+    #plt.close('all')
     fig, (ax1, ax2, ax3) = plt.subplots(3,1)
-    fig.set_size_inches(6, 9, forward=True)
+    fig.set_size_inches(7, 10, forward=True)
 
     #V_model = H + 5.0 * numpy.log10(r_obs * delta_obs) + 0.04 * phase_obs
     ax1.plot(times_year, mags, 'o', color=colors[0], label="MPC Obs. (Clipped)", zorder=2)
-    ax1.plot(times_year_all, mags_all, 'o', color=colors[2], label="All MPC Obs.", zorder=1, alpha=0.5)
+    ax1.plot(times_year_all, mags_all, 'o', color=colors[2], label="All MPC Observations", zorder=1, alpha=0.5)
+    ax1.plot(times_model, m_model, color="orangered", zorder=3, label=r'$m_V$'" Model")
 
-    ax1.legend(loc='lower center',ncol=2)
+    ax1.legend(loc='best',ncol=1)
     ax1.set_ylim(int(mags_all.max()), int(mags_all.min()-1))
     ax1.set_xlabel("Calendar Year", font="Futura")
     ax1.set_ylabel(r'$m_V$', font="Futura")
 
     ax2.plot(times_year, H, 'o', color=colors[0], label="MPC Obs. (Clipped)", zorder=2)
-    ax2.plot(times_year_all, H_all, 'o', color=colors[2], label="All MPC Obs.", zorder=1, alpha=0.5)
+    ax2.plot(times_year_all, H_all, 'o', color=colors[2], zorder=1, alpha=0.5)
+    ax2.plot(times_model, H_11a_model, color="orangered", zorder=3, label=r'$H_V$'" Model")
+
+    #print(times_year_all.size, H_11a_model.size)
 
     ax2.legend(loc='lower center',ncol=2)
     ax2.set_ylim(int(H.max()), int(H.min()-1))
@@ -194,8 +213,17 @@ def working_area(targetname, tzero_isot = "1995-01-01"):
     ax2.set_ylabel(r'$H_V(1,1,\alpha)$', font="Futura")
 
     ax3.plot(phase_obs, H, 'o', color=colors[0], label="MPC Obs. (Clipped)", zorder=2)
-    ax3.plot(phase_obs, prelim_phase_curve, color="orangered", zorder=3)
-    ax3.plot(phase_obs_all, H_all, 'o', color=colors[2], label="All MPC Obs.", zorder=1, alpha=0.5)
+    #ax3.plot(phase_obs, prelim_phase_curve, color="orangered", zorder=3)
+    ax3.plot(phase_obs_all, H_all, 'o', color=colors[2], zorder=1, alpha=0.5)
+    
+    inds = numpy.random.randint(len(flat_samples), size=100)
+    for ind in inds:
+        sample = flat_samples[ind]
+        p = Polynomial(numpy.array([sample[1], sample[0]]))
+        ax3.plot(phase_obs, p(phase_obs), color="orangered", zorder=3, alpha=0.1)
+
+    # this is meant to be off the plot, to keep the legend legible. it's lazy, yes.
+    ax3.plot(phase_obs, p(phase_obs) - 99.0, color="orangered", zorder=3, alpha=1.0, label="MCMC Phase Curve")
 
     ax3.legend(loc='lower center',ncol=2)
     ax3.set_ylim(int(H.max()), int(H.min()-1))
