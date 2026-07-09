@@ -186,6 +186,7 @@ def working_area(targetname, tzero_isot = "1999-01-01"):
     #print(times_model.size, H_11a_model.size)
 
     #plt.savefig("corner.png", dpi=300)
+    plt.savefig("MPC_corner_draft.png", dpi=300)
 
     #plt.close('all')
     fig, (ax1, ax2, ax3) = plt.subplots(3,1)
@@ -234,7 +235,7 @@ def working_area(targetname, tzero_isot = "1999-01-01"):
     plt.subplots_adjust(hspace=0.22)
 
     
-    #plt.savefig("secular_draft.png", dpi=400)
+    plt.savefig("MPC_draft.png", dpi=300)
     plt.show()
 
 if __name__ == '__main__':
