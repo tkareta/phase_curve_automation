@@ -79,7 +79,13 @@ def working_area(targetname, tzero_isot = "1999-01-01"):
     times_year = Time(times, format="jd").decimalyear
     est_err = est_err[clip]
 
-    eph = MPC.get_ephemeris(targetname, step="20d", start = tzero_isot, number = 1100)
+
+    start = Time(times[0], format="jd").isot
+    end = times[-1] - times[0]
+    print(start, end)
+    n_est = int(end / 1441) + 1
+    step_est = str(n_est)+"d" 
+    eph = MPC.get_ephemeris(targetname, step=step_est, start = start, number = 1440)
 
     #horizons_output = numpy.genfromtxt("horizons_results.txt")
     mpc_times = Time(eph["Date"], format="isot").jd #JD
