@@ -19,13 +19,18 @@ colors = ['#000104', '#ed1c24', '#1e90ff', '#bcbec0']
 
 def convert_to_V(mags, filters):
     conversions = numpy.genfromtxt("BandConversion.txt", dtype=str)
+    filt_count = numpy.zeros(len(conversions[:,1]))
     for i in range(len(mags)):
         index = numpy.where(conversions[:,0] == filters[i])
         #print(i, filters[i])
         if filters[i]!="--" and filters[i]!="T" and filters[i]!="N":
             mags[i] += float(conversions[:,1][index])
+            filt_count[index] += 1
         else:
-            mags[i] += -0.8
+            mags[i] += 0.4
+    print("Given the following filters, here are the number of observations in each:")
+    for i in range(len(conversions[:,1])):
+        print(conversions[i,0], filt_count[i])
     return mags
 
 def reduce(m, r, delta):    
@@ -51,7 +56,7 @@ def log_probability(theta, x, y, yerr):
         return -numpy.inf
     return lp + log_likelihood(theta, x, y, yerr)
 
-def working_area(targetname, tzero_isot = "1999-01-01"):
+def working_area(targetname, tzero_isot = "1999-01-01", colormode=None):
     obs = MPC.get_observations(targetname)
     times = obs["epoch"].value #Julian Dates
     times_isot = Time(times, format="jd").isot
@@ -71,14 +76,27 @@ def working_area(targetname, tzero_isot = "1999-01-01"):
 
 
     clip = numpy.where(mags < 30.0) # temp!
-    times, mags, filters, observers = times[clip], mags[clip], filters[clip], observers[clip]
+    times, mags, filters, observers, est_err = times[clip], mags[clip], filters[clip], observers[clip], est_err[clip]
     mags = convert_to_V(mags, filters)
-    est_err = est_err[clip]
     clip = numpy.where(mags > -98)
-    times, mags, filters, observers = times[clip], mags[clip], filters[clip], observers[clip]
+    times, mags, filters, observers, est_err = times[clip], mags[clip], filters[clip], observers[clip], est_err[clip]
     times_year = Time(times, format="jd").decimalyear
-    est_err = est_err[clip]
 
+    if colormode == None:
+        print("Making no cuts based on filter.")
+    if colormode == "blue":
+        #good = numpy.array(["U", "B", "g", "c"])
+        good = numpy.array(["R"])
+        print("Only using the following filters:", good)
+        for i in range(len(mags)):
+            if filters[i] in good:
+                pass
+            else:
+                mags[i] = -99
+
+    clip = numpy.where(mags > -98)
+    times, mags, filters, observers, est_err = times[clip], mags[clip], filters[clip], observers[clip], est_err[clip]
+    times_year = Time(times, format="jd").decimalyear
 
     start = Time(times[0], format="jd").isot
     end = times[-1] - times[0]
@@ -128,6 +146,14 @@ def working_area(targetname, tzero_isot = "1999-01-01"):
     phase_obs = phase_obs[conds]
     est_err = est_err[conds]
     # preliminary outlier rejection to improve initial guess for MCMC
+
+    conds = numpy.where(phase_obs<6.0)
+    times = times[conds]
+    times_year = times_year[conds]
+    mags = mags[conds]
+    H = H[conds]
+    phase_obs = phase_obs[conds]
+    est_err = est_err[conds]
 
     p = Polynomial.fit(phase_obs, H, 1)
     prelim_phase_curve = p(phase_obs)
@@ -247,4 +273,4 @@ def working_area(targetname, tzero_isot = "1999-01-01"):
 if __name__ == '__main__':
     targetname = "60558"
 
-    working_area(targetname)
+    working_area(targetname, colormode = "blue")
